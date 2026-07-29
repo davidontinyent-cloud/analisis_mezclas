@@ -26,7 +26,7 @@ with col_desc1:
     **Variables empleadas como filtros**
     * **Envejecimiento:** Sin_Envejecer (E0); Nivel_1 (ej. 2 días a 85 ºC); Nivel_2 (ej. 5 días a 85 ºC).
     * **RAP:** Sin_RAP = mezcla sin asfalto recuperado; 30_RAP = mezcla con 30% de asfalto recuperado.
-    * **Velocidad:** velocidad de desplazamiento del ensayo, con valores de 1, 2 y 50 mm/min.
+    * **Velocidad:** velocidad de desplazamiento del ensayo, con valores de 1 y 50 mm/min.
     * **Mezcla:** AC16, AC22, BBTM11.
     """)
 with col_desc2:
@@ -68,10 +68,10 @@ st.markdown("---")
 # 2. PESTAÑAS DE NAVEGACIÓN
 # ---------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Gráfico de Barras", 
-    "🕸️ Radar (Solo 50 mm/min)", 
-    "📦 Gráfico de Cajas",
-    "📈 Regresión de Rigidez"
+    "Gráfico de Barras", 
+    "Radar", 
+    "Gráfico de Cajas",
+    "Regresión de Rigidez"
 ])
 
 # --- PESTAÑA 1: GRÁFICO DE BARRAS ---
