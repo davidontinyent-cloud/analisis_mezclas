@@ -26,7 +26,7 @@ with col_desc1:
     **Variables empleadas como filtros**
     * **Envejecimiento:** Sin_Envejecer (E0); Nivel_1 (ej. 2 días a 85 ºC); Nivel_2 (ej. 5 días a 85 ºC).
     * **RAP:** Sin_RAP = mezcla sin asfalto recuperado; 30_RAP = mezcla con 30% de asfalto recuperado.
-    * **Velocidad:** velocidad de desplazamiento del ensayo, con valores de 1 y 50 mm/min.
+    * **Velocidad:** velocidad de desplazamiento del ensayo, con valores de 1, 2 y 50 mm/min.
     * **Mezcla:** AC16, AC22, BBTM11.
     """)
 with col_desc2:
@@ -67,11 +67,12 @@ st.markdown("---")
 # ---------------------------------------------------------
 # 2. PESTAÑAS DE NAVEGACIÓN
 # ---------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Gráfico de Barras", 
     "Radar", 
     "Gráfico de Cajas",
-    "Regresión de Rigidez"
+    "Regresión de Rigidez",
+    "Reparto Energético"
 ])
 
 # --- PESTAÑA 1: GRÁFICO DE BARRAS ---
@@ -276,3 +277,82 @@ with tab4:
     fig_heat, ax_heat = plt.subplots(figsize=(18, 10))
     sns.heatmap(matriz_corr, annot=True, cmap='coolwarm', fmt=".2f", linewidths=0.5, ax=ax_heat, annot_kws={"size": 8})
     st.pyplot(fig_heat)
+
+# --- PESTAÑA 5: REPARTO ENERGÉTICO (PRE-PICO VS POST-PICO) ---
+with tab5:
+    st.header("5. Balance Energético de Fractura")
+    st.markdown("Análisis comparativo de la energía necesaria para iniciar la fisuración (**Gf prepico**) frente a la capacidad de disipación y resistencia residual tras formarse la fisura (**Gf postpico**).")
+    
+    if 'Gf_prepico' in df.columns and 'Gf_postpico' in df.columns:
+        col5A, col5B, col5C = st.columns(3)
+        with col5A:
+            eje_x_energia = st.selectbox(
+                "Agrupar por (Eje X):", 
+                ['Todas', 'Mezcla', 'Envejecimiento', 'RAP'], 
+                key="energia_x"
+            )
+        with col5B:
+            filtro_vel = st.multiselect(
+                "Filtrar velocidades (mm/min):", 
+                options=sorted(df['Velocidad'].dropna().unique().tolist()),
+                default=sorted(df['Velocidad'].dropna().unique().tolist()),
+                key="energia_vel"
+            )
+        with col5C:
+            tipo_vista = st.radio(
+                "Modo de representación:", 
+                ["Valores Absolutos (J/m²)", "Porcentaje Relativo (100%)"],
+                horizontal=True,
+                key="energia_modo"
+            )
+            
+        df_energia = df[df['Velocidad'].isin(filtro_vel)].copy()
+        
+        if not df_energia.empty:
+            # Agrupamos calculando las medias de prepico y postpico
+            df_g_mean = df_energia.groupby(eje_x_energia)[['Gf_prepico', 'Gf_postpico']].mean().reset_index()
+            
+            # Si el usuario elige ver porcentajes normalizados al 100%
+            if tipo_vista == "Porcentaje Relativo (100%)":
+                total_gf = df_g_mean['Gf_prepico'] + df_g_mean['Gf_postpico']
+                df_g_mean['Gf_prepico'] = (df_g_mean['Gf_prepico'] / total_gf) * 100
+                df_g_mean['Gf_postpico'] = (df_g_mean['Gf_postpico'] / total_gf) * 100
+                formato_texto = '.1f'
+                eje_y_titulo = "Porcentaje de Energía Total (%)"
+            else:
+                formato_texto = '.1f'
+                eje_y_titulo = "Energía de Fractura (J/m²)"
+                
+            # Transformamos con melt para que Plotly pueda apilar las dos energías
+            df_melted = pd.melt(
+                df_g_mean,
+                id_vars=[eje_x_energia],
+                value_vars=['Gf_prepico', 'Gf_postpico'],
+                var_name='Fase_Energia',
+                value_name='Valor'
+            )
+            
+            fig_stack = px.bar(
+                df_melted,
+                x=eje_x_energia,
+                y='Valor',
+                color='Fase_Energia',
+                barmode='stack',
+                text_auto=formato_texto,
+                color_discrete_map={
+                    'Gf_prepico': '#3498db',   # Azul para iniciación
+                    'Gf_postpico': '#e67e22'   # Naranja para propagación
+                },
+                labels={'Fase_Energia': 'Fase de Ensayo'}
+            )
+            fig_stack.update_layout(
+                height=550, 
+                xaxis_tickangle=-45,
+                yaxis_title=eje_y_titulo,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
+        else:
+            st.warning("Selecciona al menos una velocidad para mostrar los datos de energía.")
+    else:
+        st.error("No se han encontrado las columnas 'Gf_prepico' y 'Gf_postpico' en el archivo Excel.")
