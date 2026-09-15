@@ -1,6 +1,10 @@
+streamlit
 pandas
-seaborn
-matplotlib
-statsmodels
-openpyxl
+numpy
 plotly
+matplotlib
+seaborn
+statsmodels
+scikit-learn
+scipy
+openpyxl
