@@ -10,6 +10,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from scipy.stats import f_oneway
+import os
 
 # ---------------------------------------------------------
 # 1. CONFIGURACIÓN E INTERFAZ
@@ -49,42 +50,78 @@ with col_desc2:
 
 @st.cache_data
 def cargar_datos():
-    df = pd.read_excel('datos.xlsx')
-    df.columns = df.columns.astype(str).str.strip()
-    
-    # --- LIMPIEZA A PRUEBA DE FALLOS ---
-    df = df.replace('-', np.nan)
-    df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    
-    # Forzamos las variables a numéricas por si el Excel tiene guiones de texto
-    cols_numericas = ['Carga_pico', 'CT_Index', 'Gf', 'Gf_prepico', 'Gf_postpico', 'm75', 'l75', 'lpeak', 'Rigidez_20']
-    for col in cols_numericas:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    if 'Espesor' in df.columns and 'Diametro' in df.columns:
-        # Tensión en N/mm² (MPa)
-        df['Tension_Rotura'] = (df['Carga_pico'] * 1000) / (df['Espesor'] * df['Diametro'])
+    # --- CARGA DE EXCEL ROBUSTA ---
+    if not os.path.exists('datos.xlsx'):
+        st.error("No se encontró el archivo 'datos.xlsx' en el directorio de la aplicación. Asegúrate de que el archivo Excel esté en el mismo directorio que el script de Python.")
+        st.stop()
         
-    if 'Mezcla' in df.columns:
-        if 'RAP' in df.columns and 'Envejecimiento' in df.columns:
-            df['Todas'] = df['Mezcla'] + " | RAP: " + df['RAP'].astype(str) + " | Env: " + df['Envejecimiento'].astype(str)
-        else:
-            df['Todas'] = df['Mezcla']
-    else:
-        df['Todas'] = df.iloc[:, 0]
+    try:
+        # Cargamos el Excel. Pandas necesita el motor openpyxl.
+        df = pd.read_excel('datos.xlsx', engine='openpyxl')
+        
+        # Sanitizamos los nombres de las columnas: convertimos a cadena y limpiamos espacios
+        df.columns = df.columns.astype(str).str.strip()
+
+        # --- LIMPIEZA A PRUEBA DE FALLOS ---
+        # Reemplazamos guiones por nulos para que sean reconocidos por métodos de Pandas
+        df = df.replace('-', np.nan)
+        
+        # --- NUEVA VERSIÓN DE LIMPIEZA RESILIENTE Y ROBUSTA ---
+        # Iteramos columna por columna para tener mayor control y robustez
+        for col in df.columns:
+            # Solo limpiamos si la columna es de tipo 'object' (probablemente texto)
+            if df[col].dtype == 'object':
+                # Usamos una comprensión de lista para limpiar cada celda individualmente.
+                # Es mucho más tolerante a tipos de datos inesperados y nulos que x.str vectorial.
+                try:
+                    # 'isinstance(val, str)' asegura que solo limpiamos cadenas de texto básicas de Python.
+                    # 'pd.isnull(val)' maneja los nulos correctamente para evitar conversiones raras o errores.
+                    cleaned_list = [val.strip() if isinstance(val, str) else val for val in df[col]]
+                    df[col] = cleaned_list
+                except Exception as e:
+                    # En caso de error extremo, dejamos la columna como está.
+                    pass
+        
+        # Forzamos las variables a numéricas por si el Excel tiene guiones de texto
+        cols_numericas = ['Carga_pico', 'CT_Index', 'Gf', 'Gf_prepico', 'Gf_postpico', 'm75', 'l75', 'lpeak', 'Rigidez_20']
+        for col in cols_numericas:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        if 'Espesor' in df.columns and 'Diametro' in df.columns:
+            # Tensión en N/mm² (MPa)
+            df['Tension_Rotura'] = (df['Carga_pico'] * 1000) / (df['Espesor'] * df['Diametro'])
             
-    return df
+        if 'Mezcla' in df.columns:
+            if 'RAP' in df.columns and 'Envejecimiento' in df.columns:
+                df['Todas'] = df['Mezcla'] + " | RAP: " + df['RAP'].astype(str) + " | Env: " + df['Envejecimiento'].astype(str)
+            else:
+                df['Todas'] = df['Mezcla']
+        else:
+            # Si no hay columna Mezcla, tomamos la primera columna como identificador por defecto
+            df['Todas'] = df.iloc[:, 0]
+                
+        return df
+        
+    except FileNotFoundError:
+        st.error("No se encontró el archivo 'datos.xlsx'. Asegúrate de que el archivo Excel esté en el mismo directorio que el script de Python.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Hubo un error cargando el archivo de datos. Asegúrate de que sea un archivo Excel válido. Detalles: {e}")
+        st.stop()
+    return None
 
 df = cargar_datos()
 
 # Calculamos parámetros globales derivados
 if 'l75' in df.columns and 'm75' in df.columns:
     df['abs_m75'] = df['m75'].abs()
+    # Multiplicamos por un millón (1e6) para escalar el índice a valores legibles
     df['Ratio_Flexibilidad'] = (df['l75'] / df['abs_m75'].replace(0, np.nan)) * 1e6
 
 # --- NUEVOS PARÁMETROS EXPERIMENTALES (SISTEMA INTERNACIONAL) ---
 if 'Gf_prepico' in df.columns and 'Tension_Rotura' in df.columns and 'abs_m75' in df.columns:
+    # Convertimos MPa a Pa para el cálculo
     df['Tension_Rotura_SI'] = df['Tension_Rotura'] * 1e6
     
     # Variante 1: Gf_prepico 
@@ -96,6 +133,7 @@ if 'Gf_prepico' in df.columns and 'Tension_Rotura' in df.columns and 'abs_m75' i
         df['Num_Postpico'] = df['Gf_postpico'] * df['Tension_Rotura_SI']
         df['Indice_Postpico'] = df['Num_Postpico'] / df['abs_m75'].replace(0, np.nan)
         
+    # Variables auxiliares para los nuevos gráficos (Tab índice de fisuración)
     df['TR_sobre_m75'] = df['Tension_Rotura_SI'] / df['abs_m75'].replace(0, np.nan)
 
 st.markdown("---")
@@ -128,11 +166,14 @@ with tab_parametrico:
     with col1C:
         color_bar = st.selectbox("Separar colores por:", ['Velocidad', 'Envejecimiento', 'RAP', 'Mezcla', 'Todas'], key="bar_color")
 
+    # Agrupamos y calculamos medias
     agrupacion = [eje_x_bar] if eje_x_bar == color_bar else [eje_x_bar, color_bar]
     df_barras = df.groupby(agrupacion)[param_bar].mean().reset_index()
+    # Aseguramos que el color sea tratado como categoría discreta para barras agrupadas
     df_barras[color_bar] = df_barras[color_bar].astype(str)
     
     modo_barra_t1 = 'relative' if eje_x_bar == color_bar else 'group'
+    # Formato decimal especial para lpeak
     fmt_texto_t2 = '.4f' if param_bar == 'lpeak' else '.2f'
     
     fig_bar = px.bar(
@@ -211,6 +252,7 @@ with tab_reg:
             X_simple = sm.add_constant(df_clean[pend_selec])
             modelo_simple = sm.OLS(df_clean['Rigidez_20'], X_simple).fit()
             st.metric(label="Precisión del ajuste (R²)", value=f"{modelo_simple.rsquared:.4f}")
+            # Verificación de p-valor
             p_val = modelo_simple.pvalues[pend_selec]
             if p_val < 0.05:
                 st.success(f"**Significativo** (p-value: {p_val:.4f})")
@@ -220,16 +262,19 @@ with tab_reg:
             st.warning("Faltan datos para realizar la regresión.")
             
     with col_2B:
+        # Gráfico de regresión básico con etiquetas de probeta
         if len(df_clean) > 2:
             fig_p, ax_p = plt.subplots(figsize=(9, 5))
             sns.scatterplot(data=df_clean, x=pend_selec, y='Rigidez_20', hue='Todas', palette='tab10', s=90, alpha=0.8, ax=ax_p)
             sns.regplot(data=df_clean, x=pend_selec, y='Rigidez_20', scatter=False, color='black', line_kws={'linestyle': '--', 'alpha':0.6}, ax=ax_p)
+            # Etiquetas de probetas
             if 'Probeta' in df_clean.columns:
                 for idx, row in df_clean.iterrows():
                     if pd.notna(row['Probeta']):
                         ax_p.annotate(str(row['Probeta']), (row[pend_selec], row['Rigidez_20']), textcoords="offset points", xytext=(6, 6), ha='left', fontsize=8, alpha=0.8)
             ax_p.set_ylabel('Rigidez Real (MPa)')
             ax_p.grid(True, linestyle='--', alpha=0.5)
+            # Leyenda fuera
             ax_p.legend(title='Tipo de Probeta', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8, title_fontsize=9)
             fig_p.tight_layout()
             st.pyplot(fig_p)
@@ -237,6 +282,7 @@ with tab_reg:
     st.markdown("---")
     
     st.subheader("2.2. Parámetros de Rotura vs Rigidez")
+    # Dos columnas para Carga Pico y Tensión Rotura
     col_2C, col_2D = st.columns(2)
     with col_2C:
         st.markdown("**Carga Pico**")
@@ -244,6 +290,7 @@ with tab_reg:
         if len(df_carga) > 2:
             X_carga = sm.add_constant(df_carga['Carga_pico'])
             mod_c = sm.OLS(df_carga['Rigidez_20'], X_carga).fit()
+            # Gráfico sns
             fig_c, ax_c = plt.subplots(figsize=(7, 5))
             sns.scatterplot(data=df_carga, x='Carga_pico', y='Rigidez_20', hue='Todas', palette='tab10', s=80, alpha=0.8, ax=ax_c)
             sns.regplot(data=df_carga, x='Carga_pico', y='Rigidez_20', scatter=False, color='black', line_kws={'linestyle': '--', 'alpha':0.6}, ax=ax_c)
@@ -262,6 +309,7 @@ with tab_reg:
             if len(df_tens) > 2:
                 X_tens = sm.add_constant(df_tens['Tension_Rotura'])
                 mod_t = sm.OLS(df_tens['Rigidez_20'], X_tens).fit()
+                # Gráfico sns
                 fig_t, ax_t = plt.subplots(figsize=(7, 5))
                 sns.scatterplot(data=df_tens, x='Tension_Rotura', y='Rigidez_20', hue='Todas', palette='tab10', s=80, alpha=0.8, ax=ax_t)
                 sns.regplot(data=df_tens, x='Tension_Rotura', y='Rigidez_20', scatter=False, color='black', line_kws={'linestyle': '--', 'alpha':0.6}, ax=ax_t)
@@ -275,6 +323,7 @@ with tab_reg:
 
     st.markdown("---")
     st.subheader("2.3. Matrices de Correlación")
+    # Definimos parámetros macro fijos
     macro_params = ['Rigidez_20', 'Carga_pico']
     if 'Tension_Rotura' in df_est.columns:
         macro_params.append('Tension_Rotura')
@@ -282,15 +331,19 @@ with tab_reg:
     if len(df_est) > 2 and pendientes_validas:
         st.markdown("**A. Correlación cruzada: Parámetros Macro (Rigidez y Rotura) vs Pendientes pre-pico**")
         corr_full = df_est[macro_params + pendientes_validas].corr()
+        # Seleccionamos solo las filas macro y todas las columnas
         corr_macro_pendientes = corr_full.loc[macro_params, macro_params + pendientes_validas]
+        # Mapa de calor de seaborn, muy ancho pero poco alto
         fig_heat1, ax_heat1 = plt.subplots(figsize=(20, len(macro_params) * 1.5))
         sns.heatmap(corr_macro_pendientes, annot=True, cmap='YlGnBu', fmt=".2f", linewidths=0.5, ax=ax_heat1, annot_kws={"size": 9})
+        # Forzamos rotación de etiquetas para legibilidad
         ax_heat1.tick_params(axis='y', rotation=0)
         st.pyplot(fig_heat1)
         
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("**B. Correlación interna: Análisis de colinealidad entre Pendientes**")
         corr_pendientes = df_est[pendientes_validas].corr()
+        # Máscara triangular para no duplicar datos
         mask = np.triu(np.ones_like(corr_pendientes, dtype=bool))
         fig_heat2, ax_heat2 = plt.subplots(figsize=(16, 12))
         sns.heatmap(corr_pendientes, mask=mask, annot=True, cmap='YlGnBu', fmt=".4f", linewidths=0.5, ax=ax_heat2, annot_kws={"size": 8})
@@ -300,7 +353,9 @@ with tab_reg:
 # --- PESTAÑA 3: REPARTO ENERGÉTICO ---
 with tab_energia:
     st.header("3. Balance Energético de Fractura")
+    # Comprobación de parámetros necesarios
     if 'Gf_prepico' in df.columns and 'Gf_postpico' in df.columns:
+        # Controles
         col3A, col3B, col3C = st.columns(3)
         with col3A:
             mezclas_disp = df['Mezcla'].dropna().unique().tolist()
@@ -312,22 +367,31 @@ with tab_energia:
             
         st.markdown("---")
         
+        # Filtrado de mezcla
         if filtro_mezcla_t5 != "Todas":
             df_energia = df[df['Mezcla'] == filtro_mezcla_t5].copy()
         else:
             df_energia = df.copy()
             
+        # --- EXCLUSIÓN DE MEZCLAS CON RAP ---
+        # Definición de la lógica de exclusión para AC22 con RAP (solo queremos AC22 basal en E0/E1/E2)
         df_energia = df_energia[~((df_energia['Mezcla'] == 'AC22') & (df_energia['RAP'] != 'Sin_RAP'))]
             
+        # Preparación de datos y gráficos por velocidad
         if not df_energia.empty:
+            # Layout de dos columnas para 50 y 2 mm/min
             col_v50, col_v2 = st.columns(2)
+            # Iteración sobre velocidades para consistencia
             for vel, col_layout in zip([50, 2], [col_v50, col_v2]):
                 with col_layout:
                     st.subheader(f"Velocidad: {vel} mm/min")
+                    # Filtrado por velocidad específica
                     df_vel = df_energia[df_energia['Velocidad'] == vel]
                     
                     if not df_vel.empty:
+                        # Cálculo de medias
                         df_g_mean = df_vel.groupby(eje_x_energia)[['Gf_prepico', 'Gf_postpico']].mean().reset_index()
+                        # Lógica de cálculo de porcentajes si se selecciona
                         if tipo_vista == "Porcentaje Relativo (100%)":
                             total_gf = df_g_mean['Gf_prepico'] + df_g_mean['Gf_postpico']
                             df_g_mean['Gf_prepico'] = (df_g_mean['Gf_prepico'] / total_gf) * 100
@@ -336,7 +400,9 @@ with tab_energia:
                         else:
                             eje_y_titulo = "Energía (J/m²)"
                             
+                        # Transformación de datos para gráfico apilado
                         df_melted = pd.melt(df_g_mean, id_vars=[eje_x_energia], value_vars=['Gf_prepico', 'Gf_postpico'], var_name='Fase_Energia', value_name='Valor')
+                        # Gráfico apilado con plotly
                         fig_stack = px.bar(df_melted, x=eje_x_energia, y='Valor', color='Fase_Energia', barmode='stack', text_auto='.1f', color_discrete_map={'Gf_prepico': '#3498db', 'Gf_postpico': '#e67e22'})
                         fig_stack.update_layout(height=450, xaxis_tickangle=-45, yaxis_title=eje_y_titulo)
                         st.plotly_chart(fig_stack, use_container_width=True)
@@ -350,17 +416,22 @@ with tab_energia:
 with tab_stiff:
     st.header("4. Firma Mecánica: Diagrama de Stiff Diferencial")
     
+    # Comprobación de parámetros necesarios
     cols_stiff = ['Carga_pico', 'l75', 'm75', 'Gf_postpico', 'Rigidez_20', 'Ratio_Flexibilidad']
     missing_cols = [c for c in cols_stiff if c not in df.columns]
     
     if not missing_cols:
+        # Filtro de velocidad estándar
         df_50_stiff = df[df['Velocidad'] == 50].copy()
         
+        # Layout de configuración
         col_setupA, col_setupB = st.columns(2)
+        # Opciones únicas para selectores
         mezclas_stiff = df_50_stiff['Mezcla'].dropna().unique().tolist()
         rap_stiff = df_50_stiff['RAP'].dropna().unique().tolist()
         env_stiff = df_50_stiff['Envejecimiento'].dropna().unique().tolist()
 
+        # Configuración Estado A (Referencia)
         with col_setupA:
             st.markdown("🟦 **Estado de Referencia**")
             cA1, cA2, cA3 = st.columns(3)
@@ -368,6 +439,7 @@ with tab_stiff:
             r_A = cA2.selectbox("RAP", rap_stiff, key="r_A")
             e_A = cA3.selectbox("Env", env_stiff, key="e_A")
 
+        # Configuración Estado B (Modificado)
         with col_setupB:
             st.markdown("🟧 **Estado Modificado**")
             cB1, cB2, cB3 = st.columns(3)
@@ -375,17 +447,22 @@ with tab_stiff:
             r_B = cB2.selectbox("RAP", rap_stiff, key="r_B")
             e_B = cB3.selectbox("Env", env_stiff, key="e_B")
             
+        # Filtrado de series
         df_A = df_50_stiff[(df_50_stiff['Mezcla'] == m_A) & (df_50_stiff['RAP'] == r_A) & (df_50_stiff['Envejecimiento'] == e_A)]
         df_B = df_50_stiff[(df_50_stiff['Mezcla'] == m_B) & (df_50_stiff['RAP'] == r_B) & (df_50_stiff['Envejecimiento'] == e_B)]
             
+        # Generación del gráfico si hay datos en ambas series
         if not df_A.empty and not df_B.empty:
+            # --- LÓGICA DE NORMALIZACIÓN GLOBALES ---
             def norm_stiff(val, col):
                 v_min = df_50_stiff[col].min()
                 v_max = df_50_stiff[col].max()
-                if v_max == v_min: return 0.5
+                if v_max == v_min: return 0.5  # Evitar división por cero
                 return (val - v_min) / (v_max - v_min)
 
+            # --- PREPARACIÓN DE DATOS PARA GRÁFICO ---
             def get_stiff_data(df_subset):
+                # Cálculo de medias
                 vals = {
                     'c': df_subset['Carga_pico'].mean(),
                     'l': df_subset['l75'].mean(),
@@ -395,6 +472,8 @@ with tab_stiff:
                     'rf': df_subset['Ratio_Flexibilidad'].mean()
                 }
                 
+                # Normalización y coordenadas X (negativas a izquierda, positivas a derecha)
+                # Orden: Pico (izq, arriba), |m75| (izq, medio), Rigidez (izq, abajo), RF (der, abajo), Gf_post (der, medio), l75 (der, arriba)
                 x_norm = [
                     -norm_stiff(vals['c'], 'Carga_pico'), 
                     -norm_stiff(vals['m'], 'abs_m75'), 
@@ -403,61 +482,79 @@ with tab_stiff:
                     norm_stiff(vals['gpo'], 'Gf_postpico'), 
                     norm_stiff(vals['l'], 'l75')
                 ]
+                # Etiquetas de texto con valores reales formateados
                 text_vals = [
                     f"{vals['c']:.1f}", f"{vals['m']:.2f}", f"{vals['r']:.1f}", 
                     f"{vals['rf']:.3f}", f"{vals['gpo']:.0f}", f"{vals['l']:.2f}"
                 ]
+                # Coordenadas Y fijas (3 arriba, 1 abajo)
                 y_coords = [3, 2, 1, 1, 2, 3]
+                # Cálculo del centroide X simple
                 x_centroid = sum(x_norm) / 6
                 
+                # Cierre del polígono añadiendo el primer punto al final
                 x_norm.append(x_norm[0])
                 y_coords.append(y_coords[0])
                 text_vals.append(text_vals[0])
                 return x_norm, y_coords, text_vals, x_centroid
 
+            # Obtenemos datos para ambos estados
             xA, yA, txtA, cxA = get_stiff_data(df_A)
             xB, yB, txtB, cxB = get_stiff_data(df_B)
             
+            # --- GENERACIÓN DEL GRÁFICO (go.Figure) ---
             fig_stiff = go.Figure()
             
+            # Traza Polígono Referencia (Estado A) - Azul
             fig_stiff.add_trace(go.Scatter(
                 x=xA, y=yA, fill='toself', fillcolor='rgba(52, 152, 219, 0.4)',
                 line=dict(color='#2980b9', width=2), mode='lines+markers+text',
+                # Ajuste manual de posición de texto para legibilidad
                 text=txtA, textposition=["middle right", "middle right", "middle right", "middle left", "middle left", "middle left", "middle right"],
                 marker=dict(size=8, color='#2980b9'), textfont=dict(color='#2980b9', size=11), name=f"Ref: {m_A}|{r_A}|{e_A}"
             ))
             
+            # Traza Polígono Modificado (Estado B) - Naranja
             fig_stiff.add_trace(go.Scatter(
                 x=xB, y=yB, fill='toself', fillcolor='rgba(230, 126, 34, 0.4)',
                 line=dict(color='#d35400', width=2), mode='lines+markers+text',
+                # Ajuste manual de posición de texto invertido respecto al azul
                 text=txtB, textposition=["middle left", "middle left", "middle left", "middle right", "middle right", "middle right", "middle left"],
                 marker=dict(size=8, color='#d35400'), textfont=dict(color='#d35400', size=11), name=f"Mod: {m_B}|{r_B}|{e_B}"
             ))
             
+            # Traza de Centroides (puntos sueltos en Y=2)
             fig_stiff.add_trace(go.Scatter(
                 x=[cxA, cxB], y=[2, 2], mode='markers',
                 marker=dict(size=12, color=['#2980b9', '#d35400'], symbol='diamond'),
                 name="Centroides"
             ))
             
+            # --- LÍNEAS GUÍA Y ESTRUCTURALES ---
+            # Línea central vertical (Y=0)
             fig_stiff.add_shape(type="line", x0=0, y0=0.5, x1=0, y1=3.5, line=dict(color="black", width=2, dash="dash"))
+            # Líneas horizontales para niveles Y
             fig_stiff.add_shape(type="line", x0=-1.1, y0=3, x1=1.1, y1=3, line=dict(color="gray", width=1, dash="dot"))
             fig_stiff.add_shape(type="line", x0=-1.1, y0=2, x1=1.1, y1=2, line=dict(color="gray", width=1, dash="dot"))
             fig_stiff.add_shape(type="line", x0=-1.1, y0=1, x1=1.1, y1=1, line=dict(color="gray", width=1, dash="dot"))
             
+            # --- ANOTACIÓN DE MIGRACIÓN Y TENDENCIA ---
             delta_x = cxB - cxA
             tendencia = "Rigidización" if delta_x < 0 else "Ductilización"
             
+            # Flecha de migración
             fig_stiff.add_annotation(
                 x=cxB, y=2, ax=cxA, ay=2, xref="x", yref="y", axref="x", ayref="y",
                 showarrow=True, arrowhead=3, arrowsize=1.5, arrowwidth=2, arrowcolor="black"
             )
+            # Texto explicativo de la migración
             fig_stiff.add_annotation(
                 x=(cxA + cxB)/2, y=2.15, xref="x", yref="y",
                 text=f"<b>Migración: {delta_x:.3f} ({tendencia})</b>",
                 showarrow=False, font=dict(size=13, color="black"), bgcolor="rgba(255,255,255,0.8)"
             )
 
+            # Etiquetas de ejes fijas a izquierda y derecha
             anotaciones_eje = [
                 dict(x=-1.2, y=3, text="Carga Pico", xanchor='right', showarrow=False, font=dict(size=12, color="black")),
                 dict(x=1.2, y=3, text="l75 (Desplazam.)", xanchor='left', showarrow=False, font=dict(size=12, color="black")),
@@ -467,14 +564,17 @@ with tab_stiff:
                 dict(x=1.2, y=1, text="Ratio Flexibilidad", xanchor='left', showarrow=False, font=dict(size=12, color="black"))
             ]
             
+            # Configuración final del layout
             fig_stiff.update_layout(
                 xaxis=dict(
                     range=[-1.5, 1.5], 
                     showticklabels=True, 
+                    # Ticks personalizados para mostrar valores absolutos [1..0..1]
                     tickvals=[-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1],
                     ticktext=['1.0', '0.75', '0.5', '0.25', '0', '0.25', '0.5', '0.75', '1.0'],
                     zeroline=False, showgrid=True, gridcolor='rgba(200,200,200,0.2)'
                 ),
+                # Eje Y oculto pero configurado en rango
                 yaxis=dict(range=[0.5, 3.5], showticklabels=False, zeroline=False, showgrid=False),
                 annotations=list(fig_stiff.layout.annotations) + anotaciones_eje,
                 height=650, margin=dict(l=20, r=20, t=40, b=40),
@@ -488,30 +588,40 @@ with tab_stiff:
         st.subheader("4.1. Justificación Estadística del Diagrama Stiff")
         st.markdown("Este apartado demuestra matemáticamente la correcta distribución de los ejes (Izquierda = Rigidez/Fragilidad vs Derecha = Ductilidad/Flexibilidad) utilizando los datos a **50 mm/min**.")
         
+        # Parámetros para validación, incluyendo Gf_prepico para mayor contexto
         val_params = ['Carga_pico', 'l75', 'Gf_prepico', 'Gf_postpico', 'Rigidez_20', 'm75', 'Ratio_Flexibilidad']
         missing_val_cols = [c for c in val_params if c not in df.columns]
         
         if not missing_val_cols:
+            # Filtrado de datos a 50 mm/min y limpieza de nulos
             df_val = df[df['Velocidad'] == 50][val_params].dropna()
             
             if len(df_val) > 5:
+                # Layout de validación (Corr y PCA)
                 col4A_st, col4B_st = st.columns(2)
                 with col4A_st:
                     st.markdown("**Matriz de Correlación Expandida**")
+                    # Cálculo y gráfico de correlación
                     corr_matrix = df_val.corr()
+                    # Máscara triangular
                     mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
                     fig_corr, ax_corr = plt.subplots(figsize=(10, 8))
+                    # Mapa de calor RdBu centrado en 0
                     sns.heatmap(corr_matrix, mask=mask, annot=True, cmap='RdBu', center=0, vmin=-1, vmax=1, fmt=".2f", linewidths=0.5, ax=ax_corr)
                     st.pyplot(fig_corr)
                     
                 with col4B_st:
                     st.markdown("**Análisis de Componentes Principales (PCA)**")
+                    # Escalado de datos
                     scaler = StandardScaler()
                     X_scaled = scaler.fit_transform(df_val)
+                    # Entrenamiento de PCA a 2 componentes
                     pca = PCA(n_components=2)
                     pca.fit(X_scaled)
+                    # Cargas de los componentes
                     loadings = pca.components_.T
                     
+                    # Gráfico de Biplot para PCA
                     fig_pca, ax_pca = plt.subplots(figsize=(10, 8))
                     ax_pca.set_xlim(-1, 1)
                     ax_pca.set_ylim(-1, 1)
@@ -520,8 +630,11 @@ with tab_stiff:
                     ax_pca.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}% Varianza)")
                     ax_pca.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}% Varianza)")
                     
+                    # Trazado de vectores de características
                     for i, feature in enumerate(val_params):
+                        # Flechas rojas
                         ax_pca.arrow(0, 0, loadings[i, 0], loadings[i, 1], head_width=0.04, head_length=0.04, fc='red', ec='red', alpha=0.8)
+                        # Etiquetas de texto
                         ax_pca.text(loadings[i, 0]*1.12, loadings[i, 1]*1.12, feature, color='black', ha='center', va='center', fontsize=9)
                         
                     ax_pca.grid(True, linestyle=':', alpha=0.6)
@@ -534,20 +647,24 @@ with tab_stiff:
         st.error(f"Faltan columnas en el archivo Excel necesarias para generar este gráfico.")
 
 
-# --- PESTAÑA 5: ÍNDICE DE FISURACIÓN ---
+# --- PESTAÑA 5: ÍNDICE DE FISURACIÓN (EXPERIMENTAL CON LABORATORIO Y BMD) ---
 with tab_fisuracion:
     st.header("5. Índice de Fisuración (Experimental)")
     st.markdown("Espacio de pruebas paramétrico. Evalúa la relación directa entre la energía inicial, la capacidad de carga máxima y la penalización por la fragilidad post-pico.")
     st.markdown("⚠️ *Análisis filtrado únicamente para ensayos a **50 mm/min**.*")
     
+    # Comprobación de que el índice es calculable
     if 'Indice_Prepico' in df.columns:
+        # Usamos copia filtrada a 50 mm/min
         df_tab_lab = df[df['Velocidad'] == 50].copy()
         
+        # Selector de la variante del Índice
         st.markdown("### Selecciona el modelo a evaluar:")
         tipo_indice = st.radio("Fórmula Base: (Selección × Tensión de Rotura) / |m75|", 
                                ["Energía Pre-pico", "Energía Post-pico"],
                                horizontal=True, label_visibility="collapsed")
         
+        # Asignación dinámica de variables y etiquetas según selección
         if "Pre-pico" in tipo_indice:
             col_idx = 'Indice_Prepico'
             col_num = 'Num_Prepico'
@@ -558,7 +675,7 @@ with tab_fisuracion:
             lbl_idx = 'Índice de Fisuración (Pa)'
             lbl_den = '|m75| (N/m)'
             fmt_texto = '.0f'
-        else: 
+        else: # Post-pico
             col_idx = 'Indice_Postpico'
             col_num = 'Num_Postpico'
             col_den = 'abs_m75'
@@ -571,20 +688,25 @@ with tab_fisuracion:
             
         st.markdown("---")
         
+        # --- 5.1 Gráfico de barras promedio ---
         st.subheader("5.1. Comparativa del Índice seleccionado por Mezcla")
         
+        # Controles para barras
         col_labA, col_labB = st.columns(2)
         with col_labA:
             agrup_x_lab = st.selectbox("Eje X:", ['Todas', 'Mezcla', 'Envejecimiento', 'RAP'], key="lab_x", index=0)
         with col_labB:
             color_lab = st.selectbox("Color:", ['Todas', 'Envejecimiento', 'RAP', 'Mezcla'], key="lab_color", index=0)
             
+        # Agrupación y cálculo de medias
         agrupacion_lab = [agrup_x_lab] if agrup_x_lab == color_lab else [agrup_x_lab, color_lab]
         df_barras_lab = df_tab_lab.dropna(subset=[col_idx]).groupby(agrupacion_lab)[col_idx].mean().reset_index()
+        # Aseguramos color discreto
         df_barras_lab[color_lab] = df_barras_lab[color_lab].astype(str)
         
         modo_barra_lab = 'relative' if agrup_x_lab == color_lab else 'group'
         
+        # Gráfico px.bar
         fig_bar_lab = px.bar(
             df_barras_lab, x=agrup_x_lab, y=col_idx, color=color_lab, 
             barmode=modo_barra_lab, text_auto=fmt_texto, color_discrete_sequence=px.colors.qualitative.Set2
@@ -594,21 +716,26 @@ with tab_fisuracion:
         
         st.markdown("---")
         
+        # --- 5.2 & 5.3 Análisis 2D ---
         col_labC, col_labD = st.columns(2)
         
+        # Sub-pestañas para 5.2 Análisis Específico
         with col_labC:
             st.subheader(f"5.2. Análisis 2D Específico")
             st.markdown(f"**Eje Y:** {lbl_num} | **Eje X:** {lbl_den}")
             
+            # Limpieza de nulos para gráficos de dispersión
             df_valid_lab1 = df_tab_lab.dropna(subset=[col_num, col_den])
             
+            # Sub-pestañas para filtrar rápidamente por condiciones clave
             tab_2d_1, tab_2d_2, tab_2d_3 = st.tabs(["📌 Solo Control", "♻️ Efecto RAP (AC22)", "⏳ Efecto Envejecimiento"])
             
             with tab_2d_1:
-                df_ctrl = df_valid_lab1[df_valid_lab1['Envejecimiento'] == 'Control']
+                # Solo estado control de todas las mezclas (Sin RAP)
+                df_ctrl = df_valid_lab1[(df_valid_lab1['Envejecimiento'] == 'Control') & (df_valid_lab1['RAP'] == 'Sin_RAP')]
                 fig_ctrl = px.scatter(
                     df_ctrl, x=col_den, y=col_num, color='Mezcla', 
-                    hover_data=['Probeta', 'RAP'],
+                    hover_data=['Probeta', 'Todas'],
                     labels={col_den: lbl_den, col_num: ""},
                     color_discrete_sequence=px.colors.qualitative.Set1
                 )
@@ -616,10 +743,11 @@ with tab_fisuracion:
                 st.plotly_chart(fig_ctrl, use_container_width=True)
                 
             with tab_2d_2:
-                df_ac22 = df_valid_lab1[df_valid_lab1['Mezcla'] == 'AC22']
+                # Solo AC22 con y sin RAP en estado control
+                df_ac22_rap = df_valid_lab1[(df_valid_lab1['Mezcla'] == 'AC22') & (df_valid_lab1['Envejecimiento'] == 'Control')]
                 fig_rap = px.scatter(
-                    df_ac22, x=col_den, y=col_num, color='RAP', symbol='Envejecimiento',
-                    hover_data=['Probeta'],
+                    df_ac22_rap, x=col_den, y=col_num, color='RAP', symbol='RAP',
+                    hover_data=['Probeta', 'Todas'],
                     labels={col_den: lbl_den, col_num: ""},
                     color_discrete_sequence=px.colors.qualitative.Dark2
                 )
@@ -627,10 +755,11 @@ with tab_fisuracion:
                 st.plotly_chart(fig_rap, use_container_width=True)
                 
             with tab_2d_3:
+                # Mezclas sin RAP (basales) con todo el envejecimiento
                 df_env = df_valid_lab1[df_valid_lab1['RAP'] == 'Sin_RAP']
                 fig_env = px.scatter(
                     df_env, x=col_den, y=col_num, color='Mezcla', symbol='Envejecimiento',
-                    hover_data=['Probeta'],
+                    hover_data=['Probeta', 'Todas'],
                     labels={col_den: lbl_den, col_num: ""},
                     category_orders={"Envejecimiento": ["Control", "E1", "E2"]},
                     color_discrete_sequence=px.colors.qualitative.Set1
@@ -638,69 +767,84 @@ with tab_fisuracion:
                 fig_env.update_layout(height=450, margin=dict(t=20))
                 st.plotly_chart(fig_env, use_container_width=True)
             
+        # --- 5.3 Nuevo Índice vs CT-Index ---
         with col_labD:
             st.subheader("5.3. Nuevo Índice vs CT-Index")
             st.markdown("Comprueba si esta variante muestra correlación o tendencias similares al índice normativo.")
             
+            # Limpieza de nulos para CT_Index y el nuevo índice
             df_valid_lab2 = df_tab_lab.dropna(subset=[col_idx, 'CT_Index'])
+            # Gráfico de dispersión con línea de tendencia global (ols)
             fig_scatter_lab2 = px.scatter(
                 df_valid_lab2, 
                 x='CT_Index', y=col_idx, 
                 color='Mezcla', 
-                hover_data=['Probeta', 'Envejecimiento', 'RAP'],
-                trendline="ols",
+                hover_data=['Probeta', 'Envejecimiento', 'RAP', 'Todas'],
+                trendline="ols", # Regresión OLS global
                 labels={col_idx: lbl_idx, 'CT_Index': 'CT-Index'},
                 color_discrete_sequence=px.colors.qualitative.Set1
             )
+            # Aumentar altura de este gráfico para que ocupe más espacio visual en paralelo con las pestañas
             fig_scatter_lab2.update_layout(height=520)
             st.plotly_chart(fig_scatter_lab2, use_container_width=True)
 
         st.markdown("---")
         
+        # --- NUEVOS GRÁFICOS 5.4 Y 5.5 ---
         col_labE, col_labF = st.columns(2)
         
+        # --- 5.4. Tensión / Fragilidad vs Energía analizada ---
         with col_labE:
             st.subheader(f"5.4. Tensión / Fragilidad vs {col_energia}")
             st.markdown("Análisis de la tensión penalizada por la fragilidad frente a la energía analizada.")
             
+            # Limpieza de nulos para los nuevos ejes
             df_valid_lab3 = df_tab_lab.dropna(subset=['TR_sobre_m75', col_energia])
+            # Gráfico de dispersión
             fig_scatter_lab3 = px.scatter(
                 df_valid_lab3, 
                 x=col_energia, y='TR_sobre_m75', 
                 color='Mezcla', 
                 symbol='Envejecimiento',
-                hover_data=['Probeta', 'RAP'],
+                hover_data=['Probeta', 'RAP', 'Todas'],
                 labels={col_energia: lbl_energia, 'TR_sobre_m75': 'Tensión Rotura / |m75|'},
                 color_discrete_sequence=px.colors.qualitative.Set1
             )
             
+            # Línea diagonal tenue (apoyo visual de igualdad de escalas si la hubiera)
             min_x3, max_x3 = df_valid_lab3[col_energia].min(), df_valid_lab3[col_energia].max()
             min_y3, max_y3 = df_valid_lab3['TR_sobre_m75'].min(), df_valid_lab3['TR_sobre_m75'].max()
             fig_scatter_lab3.add_shape(type="line", x0=min_x3, y0=min_y3, x1=max_x3, y1=max_y3, line=dict(color="rgba(150,150,150,0.5)", dash="dash", width=2), layer="below")
             
+            # Estilo de marcadores
             fig_scatter_lab3.update_traces(marker=dict(size=8, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
             fig_scatter_lab3.update_layout(height=500)
             st.plotly_chart(fig_scatter_lab3, use_container_width=True)
 
+        # --- 5.5. Gráfico de burbuja: Tensión vs Fragilidad ---
         with col_labF:
             st.subheader(f"5.5. Tensión vs Fragilidad (Burbuja = {col_energia})")
             st.markdown("Relación 2D donde el tamaño del punto representa la energía analizada.")
             
+            # Limpieza de nulos y cálculo de tamaño visual proporcional a energía al cubo para exagerar diferencias
             df_valid_lab4 = df_tab_lab.dropna(subset=['Tension_Rotura_SI', 'abs_m75', col_energia]).copy()
             df_valid_lab4['Tamano_Visual'] = df_valid_lab4[col_energia] ** 3
             
+            # Gráfico de burbujas (size)
             fig_scatter_lab4 = px.scatter(
                 df_valid_lab4, 
                 x='abs_m75', y='Tension_Rotura_SI', 
                 size='Tamano_Visual',
                 color='Mezcla', 
                 symbol='Envejecimiento',
-                hover_data={'Tamano_Visual': False, col_energia: True, 'Probeta': True, 'RAP': True},
+                # Ocultar tamaño visual de los hovers pero mostrar la energía real
+                hover_data={'Tamano_Visual': False, col_energia: True, 'Probeta': True, 'RAP': True, 'Todas': True},
                 labels={'abs_m75': '|m75| (N/m)', 'Tension_Rotura_SI': 'Tensión de Rotura (Pa)'},
                 color_discrete_sequence=px.colors.qualitative.Set1,
-                size_max=14 
+                size_max=14 # Tamaño máximo mucho menor para que las burbujas sean pequeñas y no solapen agresivamente
             )
             
+            # Estilo de marcadores y línea de apoyo
             fig_scatter_lab4.update_traces(marker=dict(sizemin=2, opacity=0.7, line=dict(width=1, color='DarkSlateGrey')))
             min_x4, max_x4 = df_valid_lab4['abs_m75'].min(), df_valid_lab4['abs_m75'].max()
             min_y4, max_y4 = df_valid_lab4['Tension_Rotura_SI'].min(), df_valid_lab4['Tension_Rotura_SI'].max()
@@ -711,6 +855,7 @@ with tab_fisuracion:
 
         st.markdown("---")
         
+        # --- NUEVO APARTADO 5.6: DURABILIDAD Y BMD (REDISEÑO DE EJES) ---
         st.header("5.6. Análisis de Durabilidad: Retención de Fisuración")
         st.markdown("""
         Plantear un diagrama de espacio de diseño entre el estado inicial y la tasa de retención al envejecer es una herramienta fundamental en metodologías como el Diseño Equilibrado (BMD).
@@ -725,16 +870,20 @@ with tab_fisuracion:
         * **Zona de Riesgo (Abajo a la izquierda):** Nacen frágiles y además el envejecimiento destruye la escasa matriz que les queda.
         """)
         
+        # Agrupación de datos para calcular promedios por serie
         df_dur = df_tab_lab.groupby(['Mezcla', 'RAP', 'Envejecimiento'])[col_idx].mean().reset_index()
+        # Pivotado para cruzar Control con E2
         try:
             df_pivot = df_dur.pivot(index=['Mezcla', 'RAP'], columns='Envejecimiento', values=col_idx).reset_index()
             
             if 'Control' in df_pivot.columns and 'E2' in df_pivot.columns:
+                # Cálculo de la Tasa de Retención (%)
                 df_pivot['Tasa_Retencion_E2 (%)'] = (df_pivot['E2'] / df_pivot['Control']) * 100
                 
                 col_durA, col_durB = st.columns([1.5, 1])
                 
                 with col_durA:
+                    # Gráfico de Espacio de Diseño BMD (X=Inicial, Y=Tasa)
                     fig_dur = px.scatter(
                         df_pivot, x='Control', y='Tasa_Retencion_E2 (%)', 
                         color='Mezcla', symbol='RAP',
@@ -742,30 +891,44 @@ with tab_fisuracion:
                         labels={'Control': f'{lbl_idx} (Control)', 'Tasa_Retencion_E2 (%)': 'Tasa de Retención E2 (%)'},
                         color_discrete_sequence=px.colors.qualitative.Set1
                     )
+                    # Marcadores grandes para que se vean bien
                     fig_dur.update_traces(marker=dict(size=14, line=dict(width=1, color='DarkSlateGrey')))
                     
-                    # Línea de umbral en el 70% de retención
+                    # Línea de umbral en el 70% de retención (Roja, discontinua)
+                    # Forzamos los límites X para que la línea la ocupe entera
                     min_x_dur = df_pivot['Control'].min() * 0.8
                     max_x_dur = df_pivot['Control'].max() * 1.2
                     fig_dur.add_shape(type="line", x0=min_x_dur, y0=70, x1=max_x_dur, y1=70, 
                                       line=dict(color="red", dash="dash", width=2), layer="below")
                     
-                    # Forzar a que el eje Y empiece en 0 explícitamente y suba hasta al menos el 100%
+                    # --- CONFIGURACIÓN EJE Y (0% A 100%+) ---
+                    # Forzar a que el eje Y empiece en 0 explícitamente.
+                    # El límite superior será el máximo valor de retención + un pequeño margen, o 100% si es menor.
                     max_y_dur = df_pivot['Tasa_Retencion_E2 (%)'].max()
+                    # Manejar casos donde max_y_dur sea NaN o menor a 100
                     max_y_dur = max(100, max_y_dur * 1.1) if pd.notna(max_y_dur) else 100
                     
                     fig_dur.update_layout(
                         height=500, 
                         title="Espacio de Diseño de Durabilidad (Umbral: 70%)",
-                        yaxis=dict(range=[0, max_y_dur])
+                        yaxis=dict(range=[0, max_y_dur]) # Rango de Y forzado
                     )
                     st.plotly_chart(fig_dur, use_container_width=True)
                     
                 with col_durB:
-                
+                    st.markdown("**Diagnóstico de Durabilidad de la Industria**")
+                    st.markdown("""
+                    **Tasa de Retención (Aging Ratio):**
+                    Es la métrica más estandarizada en la industria para medir el daño de la mezcla a largo plazo (homólogo al TSR para daño por humedad). 
+                    Se define como el porcentaje del índice de fisuración que sobrevive a los protocolos de envejecimiento severo en horno. 
+                    Se suele exigir que una mezcla duradera retenga al menos el **70%** de su integridad estructural original.
+                    """)
+                    
                     st.markdown("**Tabla de Diagnóstico**")
+                    # Mostramos tabla resumen
                     df_show = df_pivot.copy()
                     
+                    # Preparar columnas a mostrar ordenadas, excluyendo el gradiente de deterioro
                     cols_show = ['Mezcla', 'RAP', 'Control']
                     if 'E1' in df_show.columns: cols_show.append('E1')
                     cols_show.append('E2')
@@ -773,6 +936,7 @@ with tab_fisuracion:
                     
                     df_show = df_show[cols_show]
                     
+                    # Formateo de la tabla
                     format_dict = {'Control': '{:.0f}', 'E2': '{:.0f}', 'Tasa_Retencion_E2 (%)': '{:.1f}%'}
                     if 'E1' in df_show.columns:
                         format_dict['E1'] = '{:.0f}'
@@ -797,49 +961,61 @@ with tab_disc:
     """)
     st.markdown("---")
     
+    # Controles ML
     col_tgt1, col_tgt2 = st.columns(2)
     with col_tgt1:
         target_col = st.radio("Selecciona la variable objetivo a clasificar:", ["Mezcla", "Envejecimiento"], horizontal=True)
     
+    # Copia para ML
     df_ml = df[df['Velocidad'] == 50].copy()
     
     with col_tgt2:
+        # Lógica de sugerencias y filtrado según target
         if target_col == "Envejecimiento":
             st.info("💡 Sugerencia: Al evaluar el envejecimiento, es mejor filtrar por una mezcla concreta para evitar que las diferencias estructurales enmascaren el efecto térmico.")
             mezclas_ml = df_ml['Mezcla'].dropna().unique().tolist()
             filtro_mezcla_ml = st.selectbox("Filtrar datos por Mezcla:", ["Todas juntas"] + mezclas_ml)
             if filtro_mezcla_ml != "Todas juntas":
                 df_ml = df_ml[df_ml['Mezcla'] == filtro_mezcla_ml]
-        else:
+        else: # Mezcla
             st.info("💡 Para clasificar mezclas, el algoritmo necesita verlas todas simultáneamente. Si lo deseas, puedes aislar un estado de envejecimiento concreto.")
             env_ml = df_ml['Envejecimiento'].dropna().unique().tolist()
             filtro_env_ml = st.selectbox("Filtrar datos por Envejecimiento:", ["Todos juntos"] + env_ml)
             if filtro_env_ml != "Todos juntos":
                 df_ml = df_ml[df_ml['Envejecimiento'] == filtro_env_ml]
     
+    # Definición de características a evaluar (Numéricas, sin dtypes/accessors complejos)
     features_obj = ['Carga_pico', 'Gf_prepico', 'Gf_postpico', 'abs_m75', 'l75', 'lpeak', 'Tension_Rotura']
     valid_features = [f for f in features_obj if f in df_ml.columns]
     
+    # Limpieza final de nulos para ML
     df_ml = df_ml.dropna(subset=valid_features + [target_col])
     
+    # Comprobación de viabilidad de ML
     if len(df_ml[target_col].unique()) > 1 and len(df_ml) >= 5:
         X = df_ml[valid_features]
         y = df_ml[target_col]
         
+        # Dos columnas para ANOVA y RF
         col_discA, col_discB = st.columns(2)
         
         with col_discA:
             st.subheader("6.1. Ranking Univariante (ANOVA F-Value)")
+            # Cálculo de ANOVA por característica
             f_dict = {}
             for col in valid_features:
+                # Obtenemos grupos de datos para ANOVA
                 groups = [group[col].values for name, group in df_ml.groupby(target_col) if len(group) > 0]
                 if len(groups) > 1:
+                    # ANOVA scipy
                     f_stat, p_val = f_oneway(*groups)
                     f_dict[col] = f_stat
             
+            # Gráfico de barras de F-Value
             if f_dict:
                 df_f = pd.DataFrame(list(f_dict.items()), columns=['Parámetro', 'F-Value']).sort_values('F-Value', ascending=False)
                 fig_anova = px.bar(df_f, x='F-Value', y='Parámetro', orientation='h', text_auto='.1f', color='F-Value', color_continuous_scale='Blues')
+                # Ordenar por importancia
                 fig_anova.update_layout(yaxis={'categoryorder':'total ascending'}, height=450, coloraxis_showscale=False)
                 st.plotly_chart(fig_anova, use_container_width=True)
             else:
@@ -847,10 +1023,14 @@ with tab_disc:
         
         with col_discB:
             st.subheader("6.2. Importancia Relativa (Random Forest)")
+            # Entrenamiento de Random Forest
             rf = RandomForestClassifier(n_estimators=100, random_state=42)
             rf.fit(X, y)
+            # Extracción de importancias
             df_rf = pd.DataFrame({'Parámetro': valid_features, 'Importancia (%)': rf.feature_importances_ * 100}).sort_values('Importancia (%)', ascending=False)
+            # Gráfico de barras de importancia
             fig_rf = px.bar(df_rf, x='Importancia (%)', y='Parámetro', orientation='h', text_auto='.1f', color='Importancia (%)', color_continuous_scale='Oranges')
+            # Ordenar por importancia
             fig_rf.update_layout(yaxis={'categoryorder':'total ascending'}, height=450, coloraxis_showscale=False)
             st.plotly_chart(fig_rf, use_container_width=True)
             
